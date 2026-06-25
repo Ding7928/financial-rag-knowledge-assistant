@@ -7,7 +7,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain.chains import RetrievalQA
+from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
 
@@ -23,43 +23,65 @@ if uploaded_file:
         tmp.write(uploaded_file.read())
         tmp_path = tmp.name
 
-    loader = PyPDFLoader(tmp_path)
-    documents = loader.load()
+    with st.spinner("Processing document..."):
+        loader = PyPDFLoader(tmp_path)
+        documents = loader.load()
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=150
-    )
-    chunks = splitter.split_documents(documents)
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=800,
+            chunk_overlap=150
+        )
+        chunks = splitter.split_documents(documents)
 
-    embeddings = OpenAIEmbeddings()
-    vectorstore = FAISS.from_documents(chunks, embeddings)
+        embeddings = OpenAIEmbeddings()
+        vectorstore = FAISS.from_documents(chunks, embeddings)
 
-    retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 4}
-    )
+        retriever = vectorstore.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 4}
+        )
 
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0
-    )
-
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=retriever,
-        return_source_documents=True
-    )
+        llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0
+        )
 
     question = st.text_input("Ask a question about the document:")
 
     if question:
-        result = qa_chain.invoke({"query": question})
+        with st.spinner("Generating answer..."):
+            retrieved_docs = retriever.invoke(question)
+
+            context = "\n\n".join(
+                [doc.page_content for doc in retrieved_docs]
+            )
+
+            prompt = ChatPromptTemplate.from_template(
+                """
+                You are a financial document assistant.
+                Answer the user's question using only the context below.
+                If the answer is not in the context, say you do not know.
+
+                Context:
+                {context}
+
+                Question:
+                {question}
+                """
+            )
+
+            messages = prompt.format_messages(
+                context=context,
+                question=question
+            )
+
+            response = llm.invoke(messages)
 
         st.subheader("Answer")
-        st.write(result["result"])
+        st.write(response.content)
 
         st.subheader("Retrieved Sources")
-        for i, doc in enumerate(result["source_documents"], 1):
-            st.markdown(f"**Source {i}: Page {doc.metadata.get('page', 'N/A')}**")
+        for i, doc in enumerate(retrieved_docs, 1):
+            page_number = doc.metadata.get("page", "N/A")
+            st.markdown(f"**Source {i}: Page {page_number}**")
             st.write(doc.page_content[:800])
